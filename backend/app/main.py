@@ -1,7 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
+from backend.app.api.incidents import router as incidents_router
+
+
+app = FastAPI(title="Data Reliability Agent")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -10,6 +14,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(incidents_router)
 
 
 @app.get("/health")
