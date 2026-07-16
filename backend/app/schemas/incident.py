@@ -32,6 +32,7 @@ class IncidentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    pipeline_run_id: UUID | None
     source: str
     title: str
     description: str | None
@@ -42,3 +43,7 @@ class IncidentRead(BaseModel):
     details: dict[str, object]
     created_at: datetime
     updated_at: datetime
+
+
+class IncidentStatusUpdate(BaseModel):
+    status: IncidentStatus
