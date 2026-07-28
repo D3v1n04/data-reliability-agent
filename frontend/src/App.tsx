@@ -1,36 +1,34 @@
-import { useEffect, useState } from "react";
+import { Route, Routes } from "react-router-dom";
+
+import { AppShell } from "./components/AppShell";
+import { DashboardPage } from "./pages/DashboardPage";
+import { IncidentDetailPage } from "./pages/IncidentDetailPage";
+import { IncidentsPage } from "./pages/IncidentsPage";
+import { NotFoundPage } from "./pages/NotFoundPage";
+import { PipelineDetailPage } from "./pages/PipelineDetailPage";
+import { PipelinesPage } from "./pages/PipelinesPage";
+import { RunDetailPage } from "./pages/RunDetailPage";
 import "./App.css";
 
 function App() {
-  const [backendStatus, setBackendStatus] = useState("Checking...");
-
-  useEffect(() => {
-    async function checkBackend() {
-      try {
-        const response = await fetch("http://127.0.0.1:8000/health");
-
-        if (!response.ok) {
-          throw new Error("Backend returned an error");
-        }
-
-        const data = await response.json();
-        setBackendStatus(data.status);
-      } catch (error) {
-        console.error(error);
-        setBackendStatus("offline");
-      }
-    }
-
-    checkBackend();
-  }, []);
-
   return (
-    <main>
-      <h1>Data Agent</h1>
-      <p>
-        Backend status: <strong>{backendStatus}</strong>
-      </p>
-    </main>
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route index element={<DashboardPage />} />
+        <Route path="pipelines" element={<PipelinesPage />} />
+        <Route
+          path="pipelines/:pipelineId"
+          element={<PipelineDetailPage />}
+        />
+        <Route path="runs/:runId" element={<RunDetailPage />} />
+        <Route path="incidents" element={<IncidentsPage />} />
+        <Route
+          path="incidents/:incidentId"
+          element={<IncidentDetailPage />}
+        />
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
   );
 }
 

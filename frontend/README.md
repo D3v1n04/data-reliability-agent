@@ -1,32 +1,30 @@
-# React + TypeScript + Vite
+# Data Reliability Agent dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React and TypeScript browser interface for pipeline reliability, deterministic
+incident evidence, Bedrock diagnosis, similar incident memory, and incident
+lifecycle actions.
 
-Currently, two official plugins are available:
+## Local development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+The dashboard defaults to `http://127.0.0.1:8000` for the FastAPI API. Copy
+`.env.example` to `.env` only when you need to override that URL.
+
+## Verification
+
+```bash
+npm run lint
+npm run build
+npm test
+npx playwright install chromium
+npm run test:e2e
+```
+
+The Vitest suite exercises the incident detail workflow with controlled API
+responses. The Playwright workflow navigates from a failed pipeline run to its
+incident, generates a diagnosis, reviews related history, and moves the
+incident from open to investigating to resolved.

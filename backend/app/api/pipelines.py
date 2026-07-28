@@ -5,20 +5,23 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Query,
     Response,
     status,
 )
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.db.session import get_db
-from backend.app.models import Pipeline
+from backend.app.models import Pipeline, PipelineRun
 from backend.app.schemas import (
     PipelineCreate,
     PipelineRead,
     PipelineRunCreate,
     PipelineRunIngestResponse,
+    PipelineRunRead,
 )
 
 from backend.app.services.ingestion import (
@@ -34,6 +37,42 @@ router = APIRouter(
 )
 
 DatabaseSession = Annotated[Session, Depends(get_db)]
+
+
+@router.get(
+    "",
+    response_model=list[PipelineRead],
+)
+def list_pipelines(
+    db: DatabaseSession,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=100),
+    ] = 100,
+    offset: Annotated[
+        int,
+        Query(ge=0),
+    ] = 0,
+) -> list[Pipeline]:
+    statement = (
+        select(Pipeline)
+        .order_by(
+            Pipeline.name.asc(),
+            Pipeline.id.asc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+
+    try:
+        pipelines = db.scalars(statement).all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to retrieve pipelines",
+        ) from exc
+
+    return list(pipelines)
 
 
 @router.post(
@@ -104,6 +143,58 @@ def create_pipeline_run(
         "violations": result.violations,
         "duplicate": result.duplicate,
     }
+
+
+@router.get(
+    "/{pipeline_id}/runs",
+    response_model=list[PipelineRunRead],
+)
+def list_pipeline_runs(
+    pipeline_id: UUID,
+    db: DatabaseSession,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=100),
+    ] = 50,
+    offset: Annotated[
+        int,
+        Query(ge=0),
+    ] = 0,
+) -> list[PipelineRun]:
+    try:
+        pipeline = db.get(Pipeline, pipeline_id)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to retrieve pipeline",
+        ) from exc
+
+    if pipeline is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Pipeline not found",
+        )
+
+    statement = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_id == pipeline_id)
+        .order_by(
+            PipelineRun.completed_at.desc(),
+            PipelineRun.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+
+    try:
+        runs = db.scalars(statement).all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to retrieve pipeline runs",
+        ) from exc
+
+    return list(runs)
 
 
 @router.get(
