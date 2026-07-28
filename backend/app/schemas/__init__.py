@@ -2,6 +2,7 @@ from backend.app.schemas.incident import (
     IncidentCreate,
     IncidentRead,
     IncidentStatusUpdate,
+    IncidentDiagnosisRead,
 )
 from backend.app.schemas.pipeline import PipelineCreate, PipelineRead
 from backend.app.schemas.pipeline_run import (
@@ -16,6 +17,7 @@ from backend.app.schemas.pipeline_run import (
 
 __all__ = [
     "IncidentCreate",
+    "IncidentDiagnosisRead",
     "IncidentRead",
     "IncidentStatusUpdate",
     "PipelineCreate",

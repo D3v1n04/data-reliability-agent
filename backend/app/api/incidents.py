@@ -1,15 +1,17 @@
+import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from backend.app.db.session import get_db
-from backend.app.models import Incident
+from backend.app.models import Incident, IncidentDiagnosis
 from backend.app.schemas import (
     IncidentCreate,
+    IncidentDiagnosisRead,
     IncidentRead,
     IncidentStatusUpdate,
 )
@@ -17,10 +19,24 @@ from backend.app.schemas.incident import IncidentStatus, Severity
 
 from backend.app.services.incident_lifecycle import (
     IncidentLifecycleError,
-    IncidentNotFoundError,
+    IncidentNotFoundError as IncidentLifecycleNotFoundError,
     InvalidIncidentTransitionError,
     update_incident_status,
 )
+
+from backend.app.services.bedrock import (
+    BedrockService,
+    get_bedrock_service,
+)
+from backend.app.services.incident_diagnosis_workflow import (
+    IncidentDiagnosisWorkflowError,
+    IncidentNotDiagnosableError,
+    IncidentNotFoundError as DiagnosisIncidentNotFoundError,
+    get_or_create_incident_diagnosis,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -29,6 +45,10 @@ router = APIRouter(
 )
 
 DatabaseSession = Annotated[Session, Depends(get_db)]
+BedrockServiceDependency = Annotated[
+    BedrockService,
+    Depends(get_bedrock_service),
+]
 
 
 @router.post(
@@ -133,7 +153,7 @@ def change_incident_status(
             incident_id,
             status_data.status,
         )
-    except IncidentNotFoundError as exc:
+    except IncidentLifecycleNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Incident not found",
@@ -148,6 +168,87 @@ def change_incident_status(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to update incident",
         ) from exc
+
+
+@router.post(
+    "/{incident_id}/diagnosis",
+    response_model=IncidentDiagnosisRead,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_200_OK: {
+            "model": IncidentDiagnosisRead,
+            "description": "Existing incident diagnosis",
+        },
+    },
+)
+def diagnose_incident(
+    incident_id: UUID,
+    response: Response,
+    db: DatabaseSession,
+    bedrock_service: BedrockServiceDependency,
+) -> IncidentDiagnosis:
+    try:
+        result = get_or_create_incident_diagnosis(
+            db=db,
+            incident_id=incident_id,
+            bedrock_service=bedrock_service,
+        )
+    except DiagnosisIncidentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Incident not found",
+        ) from exc
+    except IncidentNotDiagnosableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except IncidentDiagnosisWorkflowError as exc:
+        logger.exception(
+            "Incident diagnosis workflow failed for incident %s",
+            incident_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to diagnose incident",
+        ) from exc
+
+    response.status_code = (
+        status.HTTP_201_CREATED
+        if result.created
+        else status.HTTP_200_OK
+    )
+
+    return result.diagnosis
+
+
+@router.get(
+    "/{incident_id}/diagnosis",
+    response_model=IncidentDiagnosisRead,
+)
+def get_incident_diagnosis(
+    incident_id: UUID,
+    db: DatabaseSession,
+) -> IncidentDiagnosis:
+    statement = select(IncidentDiagnosis).where(
+        IncidentDiagnosis.incident_id == incident_id
+    )
+
+    try:
+        diagnosis = db.scalar(statement)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to retrieve incident diagnosis",
+        ) from exc
+
+    if diagnosis is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Incident diagnosis not found",
+        )
+
+    return diagnosis
 
 
 @router.get(

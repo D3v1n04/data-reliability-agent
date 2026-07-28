@@ -45,5 +45,19 @@ class IncidentRead(BaseModel):
     updated_at: datetime
 
 
+class IncidentDiagnosisRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    incident_id: UUID
+    explanation: str
+    likely_causes: list[str]
+    recommendations: list[str]
+    confidence: float
+    evidence: dict[str, object]
+    text_model_id: str
+    created_at: datetime
+
+
 class IncidentStatusUpdate(BaseModel):
     status: IncidentStatus
