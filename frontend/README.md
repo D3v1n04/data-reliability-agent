@@ -14,6 +14,10 @@ npm run dev
 The dashboard defaults to `http://127.0.0.1:8000` for the FastAPI API. Copy
 `.env.example` to `.env` only when you need to override that URL.
 
+Production builds default to same-origin API paths. CloudFront sends `/api/*`,
+`/health`, and `/ready` to API Gateway while all other paths use the private S3
+frontend origin.
+
 ## Verification
 
 ```bash

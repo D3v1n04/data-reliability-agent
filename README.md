@@ -19,11 +19,15 @@ The governing principle is:
 - Titan Text Embeddings V2 normalized 256-dimensional incident embeddings
 - Similar incident retrieval through CockroachDB vector distance
 - Responsive pipeline, run, incident, evidence, diagnosis, and history views
+- Cost-conscious AWS SAM deployment through CloudFront, S3, API Gateway, and
+  Lambda
+- Runtime IAM roles, SSM SecureString configuration, bounded dependency calls,
+  structured logs, metrics, and CloudWatch alarms
 - Backend, frontend component, and Playwright workflow tests
 
 MCP is not part of the completed implementation and remains a later explicit
-milestone. Autonomous remediation, AWS deployment, and production
-infrastructure are also outside the current scope.
+Phase 8.5 candidate. Autonomous remediation and automatic pipeline changes
+remain outside the current scope.
 
 ## Run locally
 
@@ -64,6 +68,18 @@ The browser workflow covered by Playwright is:
 
 `pipeline failure → run evidence → incident evidence → diagnosis → similar
 history → investigating → resolved`
+
+## Deploy to AWS
+
+Phase 8 uses a private S3/CloudFront frontend and an API Gateway/Lambda
+FastAPI backend. Lambda uses its execution role, loads the restricted
+CockroachDB runtime URL from SSM SecureString, and invokes only the approved
+Bedrock models.
+
+Read [the Phase 8 deployment and observability runbook](docs/phase-8-deployment.md)
+before creating resources. It covers architecture, expected cost, local
+validation, deployment, live acceptance, degraded dependency tests, log
+auditing, rollback, and teardown.
 
 ## Phase 6 read APIs
 

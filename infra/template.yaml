@@ -1,0 +1,423 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Data Reliability Agent production-style serverless deployment
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - test
+  DatabaseUrlParameterName:
+    Type: String
+    Default: /data-reliability-agent/production/database-url
+    Description: Existing SSM SecureString containing the dra_app connection URL
+  BedrockTextModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+  BedrockEmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+  AlarmNotificationEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address for alarm notifications
+  BackendReservedConcurrency:
+    Type: Number
+    Default: 2
+    MinValue: 0
+    MaxValue: 10
+    Description: Use 0 to omit the limit when the account cannot reserve concurrency
+
+Conditions:
+  HasAlarmNotificationEmail: !Not
+    - !Equals
+      - !Ref AlarmNotificationEmail
+      - ""
+  HasReservedConcurrency: !Not
+    - !Equals
+      - !Ref BackendReservedConcurrency
+      - 0
+
+Globals:
+  Function:
+    Architectures:
+      - x86_64
+    MemorySize: 1024
+    Timeout: 25
+    LoggingConfig:
+      ApplicationLogLevel: INFO
+      LogFormat: JSON
+      SystemLogLevel: INFO
+    Environment:
+      Variables:
+        APP_NAME: Data Reliability Agent
+        ENVIRONMENT: !Ref Environment
+        DATABASE_URL_SSM_PARAMETER: !Ref DatabaseUrlParameterName
+        CORS_ALLOWED_ORIGINS: ""
+        BEDROCK_TEXT_MODEL_ID: !Ref BedrockTextModelId
+        BEDROCK_EMBEDDING_MODEL_ID: !Ref BedrockEmbeddingModelId
+        BEDROCK_EMBEDDING_DIMENSIONS: "256"
+        BEDROCK_CONNECT_TIMEOUT_SECONDS: "3"
+        BEDROCK_READ_TIMEOUT_SECONDS: "20"
+        AWS_MAX_ATTEMPTS: "2"
+        DATABASE_POOL_SIZE: "1"
+        DATABASE_MAX_OVERFLOW: "0"
+        DATABASE_POOL_TIMEOUT_SECONDS: "5"
+        DATABASE_POOL_RECYCLE_SECONDS: "300"
+        DATABASE_CONNECT_TIMEOUT_SECONDS: "5"
+        DATABASE_STATEMENT_TIMEOUT_MS: "10000"
+        LOG_LEVEL: INFO
+        METRICS_NAMESPACE: DataReliabilityAgent
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 5
+        ThrottlingRateLimit: 2
+
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-backend
+      RetentionInDays: 14
+
+  BackendFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - BackendLogGroup
+    Metadata:
+      Dockerfile: backend/Dockerfile
+      DockerContext: ..
+      DockerTag: python3.12-v1
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-backend
+      PackageType: Image
+      ReservedConcurrentExecutions: !If
+        - HasReservedConcurrency
+        - !Ref BackendReservedConcurrency
+        - !Ref AWS::NoValue
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: ReadDatabaseSecureString
+              Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource: !Sub
+                - arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterName}
+                - ParameterName: !Ref DatabaseUrlParameterName
+            - Sid: InvokeApprovedBedrockModels
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockTextModelId}
+                - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockEmbeddingModelId}
+      Events:
+        ApiProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: ANY
+            Path: /{proxy+}
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: Access the private Data Reliability Agent frontend bucket
+        Name: !Sub ${AWS::StackName}-frontend-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub ${AWS::StackName} frontend and API
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: FrontendS3
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: BackendHttpApi
+            DomainName: !Sub ${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true
+          TargetOriginId: FrontendS3
+          ViewerProtocolPolicy: redirect-to-https
+        CacheBehaviors:
+          - PathPattern: /api/*
+            AllowedMethods:
+              - DELETE
+              - GET
+              - HEAD
+              - OPTIONS
+              - PATCH
+              - POST
+              - PUT
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            Compress: true
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            TargetOriginId: BackendHttpApi
+            ViewerProtocolPolicy: redirect-to-https
+          - PathPattern: /health
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            Compress: true
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            TargetOriginId: BackendHttpApi
+            ViewerProtocolPolicy: redirect-to-https
+          - PathPattern: /ready
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            Compress: true
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            TargetOriginId: BackendHttpApi
+            ViewerProtocolPolicy: redirect-to-https
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmNotificationEmail
+    Properties:
+      DisplayName: Data Reliability Agent alarms
+
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmNotificationEmail
+    Properties:
+      Endpoint: !Ref AlarmNotificationEmail
+      Protocol: email
+      TopicArn: !Ref AlarmTopic
+
+  BackendErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda returned at least one unhandled error
+      AlarmActions: !If
+        - HasAlarmNotificationEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BackendFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+
+  BackendThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda reserved concurrency or API traffic caused throttling
+      AlarmActions: !If
+        - HasAlarmNotificationEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BackendFunction
+      EvaluationPeriods: 1
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+
+  BackendDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A backend request approached the 25-second timeout
+      AlarmActions: !If
+        - HasAlarmNotificationEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BackendFunction
+      EvaluationPeriods: 1
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Maximum
+      Threshold: 20000
+      TreatMissingData: notBreaching
+
+  ApiServerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: HTTP API returned at least one 5xx response
+      AlarmActions: !If
+        - HasAlarmNotificationEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref HttpApi
+        - Name: Stage
+          Value: $default
+      EvaluationPeriods: 1
+      MetricName: 5xx
+      Namespace: AWS/ApiGateway
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+
+  BedrockFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The diagnosis workflow could not invoke or validate Bedrock
+      AlarmActions: !If
+        - HasAlarmNotificationEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      EvaluationPeriods: 1
+      MetricName: BedrockFailures
+      Namespace: DataReliabilityAgent
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+
+  DatabaseFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The backend could not load or reach CockroachDB
+      AlarmActions: !If
+        - HasAlarmNotificationEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      EvaluationPeriods: 1
+      MetricName: DatabaseFailures
+      Namespace: DataReliabilityAgent
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApplicationUrl:
+    Description: CloudFront HTTPS URL for the dashboard and API
+    Value: !Sub https://${FrontendDistribution.DomainName}
+  HttpApiUrl:
+    Description: Direct HTTP API URL for operational troubleshooting
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  FrontendBucketName:
+    Description: Private bucket receiving the frontend dist artifact
+    Value: !Ref FrontendBucket
+  CloudFrontDistributionId:
+    Description: Distribution invalidated after frontend releases
+    Value: !Ref FrontendDistribution
+  BackendFunctionName:
+    Description: Lambda function name
+    Value: !Ref BackendFunction

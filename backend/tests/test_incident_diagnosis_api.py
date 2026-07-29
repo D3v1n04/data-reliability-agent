@@ -187,6 +187,7 @@ def test_post_returns_409_for_incident_without_run() -> None:
 
 def test_post_returns_503_and_logs_workflow_failure(
     caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     db = Mock(spec=Session)
     bedrock_service = Mock(spec=BedrockService)
@@ -226,8 +227,13 @@ def test_post_returns_503_and_logs_workflow_failure(
     )
     assert exc_info.value.detail == "Unable to diagnose incident"
     assert len(caplog.records) == 1
-    assert caplog.records[0].exc_info is not None
-    assert str(INCIDENT_ID) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is None
+    assert caplog.records[0].getMessage() == (
+        "incident_diagnosis_failed"
+    )
+    assert str(INCIDENT_ID) not in caplog.text
+    assert "underlying failure" not in caplog.text
+    assert "underlying failure" not in capsys.readouterr().out
 
 
 def test_get_returns_stored_diagnosis() -> None:

@@ -28,6 +28,7 @@ from backend.app.services.bedrock import (
     BedrockService,
     get_bedrock_service,
 )
+from backend.app.core.observability import emit_dependency_failure
 from backend.app.services.incident_diagnosis_workflow import (
     IncidentDiagnosisWorkflowError,
     IncidentNotDiagnosableError,
@@ -204,14 +205,23 @@ def diagnose_incident(
             detail=str(exc),
         ) from exc
     except IncidentDiagnosisWorkflowError as exc:
-        logger.exception(
-            "Incident diagnosis workflow failed for incident %s",
-            incident_id,
+        failure_category = (
+            exc.category
+            if exc.category in {"bedrock", "database", "diagnosis"}
+            else "diagnosis"
         )
+        logger.error(
+            "incident_diagnosis_failed",
+            extra={
+                "event": "dependency_failure",
+                "failure_category": failure_category,
+            },
+        )
+        emit_dependency_failure(failure_category)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to diagnose incident",
-        ) from exc
+        ) from None
 
     response.status_code = (
         status.HTTP_201_CREATED

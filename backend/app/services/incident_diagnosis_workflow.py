@@ -38,6 +38,14 @@ class IncidentNotDiagnosableError(ValueError):
 class IncidentDiagnosisWorkflowError(RuntimeError):
     """Raised when the diagnosis workflow cannot complete."""
 
+    def __init__(
+        self,
+        message: str,
+        category: str = "diagnosis",
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+
 
 @dataclass(frozen=True)
 class IncidentDiagnosisWorkflowResult:
@@ -60,7 +68,8 @@ def _find_existing_diagnosis(
         return db.scalar(query)
     except SQLAlchemyError as exc:
         raise IncidentDiagnosisWorkflowError(
-            "Unable to retrieve incident diagnosis"
+            "Unable to retrieve incident diagnosis",
+            category="database",
         ) from exc
 
 
@@ -73,7 +82,8 @@ def _load_incident_context(
         incident = db.get(Incident, incident_id)
     except SQLAlchemyError as exc:
         raise IncidentDiagnosisWorkflowError(
-            "Unable to retrieve incident"
+            "Unable to retrieve incident",
+            category="database",
         ) from exc
 
     if incident is None:
@@ -91,12 +101,14 @@ def _load_incident_context(
         )
     except SQLAlchemyError as exc:
         raise IncidentDiagnosisWorkflowError(
-            "Unable to retrieve incident pipeline run"
+            "Unable to retrieve incident pipeline run",
+            category="database",
         ) from exc
 
     if pipeline_run is None:
         raise IncidentDiagnosisWorkflowError(
-            "Incident pipeline run was not found"
+            "Incident pipeline run was not found",
+            category="database",
         )
 
     try:
@@ -106,12 +118,14 @@ def _load_incident_context(
         )
     except SQLAlchemyError as exc:
         raise IncidentDiagnosisWorkflowError(
-            "Unable to retrieve incident pipeline"
+            "Unable to retrieve incident pipeline",
+            category="database",
         ) from exc
 
     if pipeline is None:
         raise IncidentDiagnosisWorkflowError(
-            "Incident pipeline was not found"
+            "Incident pipeline was not found",
+            category="database",
         )
 
     return incident, pipeline_run, pipeline
@@ -164,16 +178,26 @@ def get_or_create_incident_diagnosis(
             similar_memories=similar_memories,
             bedrock_service=bedrock_service,
         )
-    except (
-        BedrockServiceError,
-        IncidentMemoryStoreError,
-        IncidentDiagnosisGenerationError,
-        ValueError,
-    ) as exc:
+    except BedrockServiceError as exc:
         db.rollback()
 
         raise IncidentDiagnosisWorkflowError(
-            "Unable to generate incident diagnosis"
+            "Unable to generate incident diagnosis",
+            category="bedrock",
+        ) from exc
+    except IncidentMemoryStoreError as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to generate incident diagnosis",
+            category="database",
+        ) from exc
+    except (IncidentDiagnosisGenerationError, ValueError) as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to generate incident diagnosis",
+            category="diagnosis",
         ) from exc
 
     diagnosis = IncidentDiagnosis(
@@ -202,7 +226,8 @@ def get_or_create_incident_diagnosis(
             db.rollback()
 
             raise IncidentDiagnosisWorkflowError(
-                "Unable to recover concurrent diagnosis"
+                "Unable to recover concurrent diagnosis",
+                category="database",
             ) from exc
 
         try:
@@ -212,7 +237,8 @@ def get_or_create_incident_diagnosis(
             db.rollback()
 
             raise IncidentDiagnosisWorkflowError(
-                "Unable to finalize concurrent diagnosis"
+                "Unable to finalize concurrent diagnosis",
+                category="database",
             ) from commit_exc
 
         return IncidentDiagnosisWorkflowResult(
@@ -223,7 +249,8 @@ def get_or_create_incident_diagnosis(
         db.rollback()
 
         raise IncidentDiagnosisWorkflowError(
-            "Unable to store incident diagnosis"
+            "Unable to store incident diagnosis",
+            category="database",
         ) from exc
 
     try:
@@ -233,7 +260,8 @@ def get_or_create_incident_diagnosis(
         db.rollback()
 
         raise IncidentDiagnosisWorkflowError(
-            "Unable to commit incident diagnosis"
+            "Unable to commit incident diagnosis",
+            category="database",
         ) from exc
 
     return IncidentDiagnosisWorkflowResult(

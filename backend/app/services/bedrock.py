@@ -3,9 +3,12 @@ import math
 from functools import lru_cache
 from typing import Any
 
-import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from backend.app.core.aws import (
+    create_aws_client_config,
+    create_aws_session,
+)
 from backend.app.core.config import Settings, get_settings
 
 
@@ -24,11 +27,11 @@ class BedrockService:
         self.settings = settings or get_settings()
 
         if client is None:
-            session = boto3.Session(
-                profile_name=self.settings.aws_profile,
-                region_name=self.settings.aws_region,
+            session = create_aws_session(self.settings)
+            client = session.client(
+                "bedrock-runtime",
+                config=create_aws_client_config(self.settings),
             )
-            client = session.client("bedrock-runtime")
 
         self.client = client
 
