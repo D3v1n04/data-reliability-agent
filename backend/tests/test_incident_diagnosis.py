@@ -1,12 +1,14 @@
 import json
 from copy import deepcopy
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
 
 from backend.app.services.bedrock import BedrockService
 from backend.app.services.incident_diagnosis import (
+    CAUSE_GROUNDING_CONFIDENCE_CEILING,
+    CAUSE_GROUNDING_INSUFFICIENCY_STATEMENT,
     DIAGNOSIS_SYSTEM_PROMPT,
     DIAGNOSIS_TOOL_CONFIG,
     DIAGNOSIS_TOOL_NAME,
@@ -131,7 +133,7 @@ def test_build_diagnosis_prompt_contains_grounded_context() -> None:
 
 def test_generates_valid_structured_diagnosis() -> None:
     bedrock_service = Mock(spec=BedrockService)
-    bedrock_service.generate_structured_output.return_value = {
+    response_payload = {
         "explanation": (
             "The import failed after source-file validation."
         ),
@@ -145,6 +147,8 @@ def test_generates_valid_structured_diagnosis() -> None:
         ],
         "confidence": 0.87,
     }
+    original_payload = deepcopy(response_payload)
+    bedrock_service.generate_structured_output.return_value = response_payload
 
     result = generate_incident_diagnosis(
         incident_snapshot=make_snapshot(),
@@ -152,9 +156,22 @@ def test_generates_valid_structured_diagnosis() -> None:
         bedrock_service=bedrock_service,
     )
 
-    assert result.confidence == pytest.approx(0.87)
-    assert len(result.likely_causes) == 2
+    assert result.confidence == pytest.approx(
+        CAUSE_GROUNDING_CONFIDENCE_CEILING
+    )
+    assert result.likely_causes == [
+        CAUSE_GROUNDING_INSUFFICIENCY_STATEMENT
+    ]
     assert len(result.recommendations) == 2
+    assert result.explanation == response_payload["explanation"]
+    assert result.recommendations == response_payload["recommendations"]
+    assert response_payload == original_payload
+    assert "Invalid source file structure" not in json.dumps(
+        result.evidence
+    )
+    assert "Unexpected source data values" not in json.dumps(
+        result.evidence
+    )
 
     assert result.evidence["current_incident_id"] == (
         str(INCIDENT_ID)
@@ -191,6 +208,74 @@ def test_generates_valid_structured_diagnosis() -> None:
     assert json.loads(request["prompt"])[
         "current_incident"
     ]["run"]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("model_confidence", "expected_confidence"),
+    [
+        (0.8, 0.6),
+        (0.7, 0.6),
+        (0.6, 0.6),
+        (0.4, 0.4),
+    ],
+)
+def test_cause_grounding_policy_caps_confidence_without_increasing_it(
+    model_confidence: float,
+    expected_confidence: float,
+) -> None:
+    bedrock_service = Mock(spec=BedrockService)
+    bedrock_service.generate_structured_output.return_value = {
+        "explanation": "RUN_FAILED was observed.",
+        "likely_causes": ["A speculative internal failure"],
+        "recommendations": ["Inspect authoritative run evidence"],
+        "confidence": model_confidence,
+    }
+
+    result = generate_incident_diagnosis(
+        incident_snapshot=make_snapshot(),
+        similar_memories=[],
+        bedrock_service=bedrock_service,
+    )
+
+    assert result.confidence == pytest.approx(expected_confidence)
+    assert result.likely_causes == [
+        CAUSE_GROUNDING_INSUFFICIENCY_STATEMENT
+    ]
+
+
+def test_diagnosis_prompts_prioritize_current_evidence_and_safety() -> None:
+    prompt = json.loads(
+        build_diagnosis_prompt(
+            make_snapshot(),
+            [make_similar_memory()],
+        )
+    )
+    requirements = " ".join(prompt["requirements"]).lower()
+    system_prompt = DIAGNOSIS_SYSTEM_PROMPT.lower()
+
+    assert "exact rule code" in requirements
+    assert "deterministic violations" in requirements
+    assert "structured run fields" in requirements
+    assert "authoritative" in requirements
+    assert "untrusted quoted data" in requirements
+    assert "never repeat" in requirements
+    assert "historical context" in requirements
+    assert "does not by itself prove" in requirements
+    assert "never question" in requirements
+    assert "irrelevant text verbatim anywhere" in requirements
+    assert "observed facts from hypotheses" in requirements
+    assert "within its configured limit" in requirements
+    assert "insufficient rather than inventing" in requirements
+    assert "no higher than 0.6" in requirements
+    assert "safe investigation or validation" in requirements
+
+    assert "exact rule code" in system_prompt
+    assert "untrusted quoted data" in system_prompt
+    assert "never question" in system_prompt
+    assert "irrelevant text verbatim anywhere" in system_prompt
+    assert "no higher than 0.6" in system_prompt
+    assert str(INCIDENT_ID) not in json.dumps(prompt)
+    assert str(PRIOR_INCIDENT_ID) not in json.dumps(prompt)
 
 
 def test_generates_diagnosis_without_prior_memories() -> None:
@@ -251,12 +336,18 @@ def test_rejects_invalid_diagnosis_structure() -> None:
         "unexpected_field": "not allowed",
     }
 
-    with pytest.raises(
-        IncidentDiagnosisGenerationError,
-        match="invalid diagnosis structure",
-    ):
-        generate_incident_diagnosis(
-            incident_snapshot=make_snapshot(),
-            similar_memories=[],
-            bedrock_service=bedrock_service,
-        )
+    with patch(
+        "backend.app.services.incident_diagnosis."
+        "_apply_cause_grounding_policy"
+    ) as policy:
+        with pytest.raises(
+            IncidentDiagnosisGenerationError,
+            match="invalid diagnosis structure",
+        ):
+            generate_incident_diagnosis(
+                incident_snapshot=make_snapshot(),
+                similar_memories=[],
+                bedrock_service=bedrock_service,
+            )
+
+    policy.assert_not_called()
