@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
+from time import monotonic
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,9 +23,13 @@ from backend.app.services.incident_diagnosis import (
     generate_incident_diagnosis,
 )
 from backend.app.services.incident_memory_store import (
+    IncidentMemoryInput,
     IncidentMemoryStoreError,
+    build_incident_memory_input,
     find_similar_incident_memories,
-    get_or_create_incident_memory,
+    generate_incident_memory,
+    load_incident_memory,
+    persist_incident_memory,
 )
 
 
@@ -131,14 +137,46 @@ def _load_incident_context(
     return incident, pipeline_run, pipeline
 
 
+def _end_read_transaction(
+    db: Session,
+    failure_message: str,
+) -> None:
+    """Roll back a read transaction and return its pooled connection."""
+    try:
+        db.rollback()
+    except SQLAlchemyError as exc:
+        raise IncidentDiagnosisWorkflowError(
+            failure_message,
+            category="database",
+        ) from exc
+
+
+def _ensure_diagnosis_deadline(
+    db: Session,
+    deadline: float,
+    clock: Callable[[], float],
+) -> None:
+    """Fail through the controlled Bedrock path when budget is exhausted."""
+    if clock() < deadline:
+        return
+
+    db.rollback()
+    raise IncidentDiagnosisWorkflowError(
+        "Unable to generate incident diagnosis",
+        category="bedrock",
+    )
+
+
 def get_or_create_incident_diagnosis(
     db: Session,
     incident_id: UUID,
     bedrock_service: BedrockService,
     settings: Settings | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> IncidentDiagnosisWorkflowResult:
     """Generate and persist one diagnosis per incident."""
     resolved_settings = settings or get_settings()
+    deadline = clock() + resolved_settings.diagnosis_timeout_seconds
 
     existing_diagnosis = _find_existing_diagnosis(
         db,
@@ -156,25 +194,100 @@ def get_or_create_incident_diagnosis(
         incident_id,
     )
 
+    incident_id_value = incident.id
+    memory_input: IncidentMemoryInput | None = None
+
     try:
-        memory = get_or_create_incident_memory(
+        prepared_memory = load_incident_memory(
             db=db,
-            incident=incident,
-            pipeline_run=pipeline_run,
-            pipeline=pipeline,
-            bedrock_service=bedrock_service,
-            settings=resolved_settings,
+            incident_id=incident_id_value,
         )
 
+        if prepared_memory is None:
+            memory_input = build_incident_memory_input(
+                incident,
+                pipeline_run,
+                pipeline,
+            )
+    except IncidentMemoryStoreError as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to prepare incident memory",
+            category="database",
+        ) from exc
+    except ValueError as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to prepare incident memory",
+            category="diagnosis",
+        ) from exc
+
+    _end_read_transaction(
+        db,
+        "Unable to finish incident evidence retrieval",
+    )
+    _ensure_diagnosis_deadline(db, deadline, clock)
+
+    try:
+        if prepared_memory is None:
+            if memory_input is None:
+                raise ValueError("Incident memory input is unavailable")
+
+            prepared_memory = generate_incident_memory(
+                memory_input=memory_input,
+                bedrock_service=bedrock_service,
+                settings=resolved_settings,
+            )
+    except BedrockServiceError as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to generate incident diagnosis",
+            category="bedrock",
+        ) from exc
+    except ValueError as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to generate incident diagnosis",
+            category="diagnosis",
+        ) from exc
+
+    _ensure_diagnosis_deadline(db, deadline, clock)
+
+    try:
         similar_memories = find_similar_incident_memories(
             db=db,
-            embedding=memory.embedding,
-            exclude_incident_id=incident.id,
+            embedding=prepared_memory.embedding,
+            exclude_incident_id=incident_id_value,
             settings=resolved_settings,
         )
+    except IncidentMemoryStoreError as exc:
+        db.rollback()
 
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to generate incident diagnosis",
+            category="database",
+        ) from exc
+    except ValueError as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to generate incident diagnosis",
+            category="diagnosis",
+        ) from exc
+
+    _end_read_transaction(
+        db,
+        "Unable to finish similar incident retrieval",
+    )
+    _ensure_diagnosis_deadline(db, deadline, clock)
+
+    try:
         generated_diagnosis = generate_incident_diagnosis(
-            incident_snapshot=memory.incident_snapshot,
+            incident_snapshot=prepared_memory.incident_snapshot,
             similar_memories=similar_memories,
             bedrock_service=bedrock_service,
         )
@@ -185,13 +298,6 @@ def get_or_create_incident_diagnosis(
             "Unable to generate incident diagnosis",
             category="bedrock",
         ) from exc
-    except IncidentMemoryStoreError as exc:
-        db.rollback()
-
-        raise IncidentDiagnosisWorkflowError(
-            "Unable to generate incident diagnosis",
-            category="database",
-        ) from exc
     except (IncidentDiagnosisGenerationError, ValueError) as exc:
         db.rollback()
 
@@ -200,8 +306,10 @@ def get_or_create_incident_diagnosis(
             category="diagnosis",
         ) from exc
 
+    _ensure_diagnosis_deadline(db, deadline, clock)
+
     diagnosis = IncidentDiagnosis(
-        incident_id=incident.id,
+        incident_id=incident_id_value,
         explanation=generated_diagnosis.explanation,
         likely_causes=generated_diagnosis.likely_causes,
         recommendations=generated_diagnosis.recommendations,
@@ -209,6 +317,44 @@ def get_or_create_incident_diagnosis(
         evidence=generated_diagnosis.evidence,
         text_model_id=resolved_settings.bedrock_text_model_id,
     )
+
+    concurrent_diagnosis = _find_existing_diagnosis(
+        db,
+        incident_id,
+    )
+
+    if concurrent_diagnosis is not None:
+        try:
+            db.rollback()
+            db.refresh(concurrent_diagnosis)
+        except SQLAlchemyError as exc:
+            db.rollback()
+
+            raise IncidentDiagnosisWorkflowError(
+                "Unable to finalize concurrent diagnosis",
+                category="database",
+            ) from exc
+
+        return IncidentDiagnosisWorkflowResult(
+            diagnosis=concurrent_diagnosis,
+            created=False,
+        )
+
+    _ensure_diagnosis_deadline(db, deadline, clock)
+
+    try:
+        if prepared_memory.needs_persistence:
+            persist_incident_memory(
+                db,
+                prepared_memory,
+            )
+    except IncidentMemoryStoreError as exc:
+        db.rollback()
+
+        raise IncidentDiagnosisWorkflowError(
+            "Unable to store incident memory",
+            category="database",
+        ) from exc
 
     try:
         with db.begin_nested():

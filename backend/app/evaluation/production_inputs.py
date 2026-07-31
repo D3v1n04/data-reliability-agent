@@ -33,7 +33,7 @@ _RULE_SEVERITY = {
     "DURATION_EXCEEDED": "high",
     "ROW_COUNT_BELOW_MINIMUM": "high",
     "QUALITY_CHECKS_FAILED": "high",
-    "CANCELLED_RUN": "high",
+    "RUN_CANCELLED": "high",
 }
 
 _SEVERITY_RANK = {
@@ -114,7 +114,7 @@ def _build_snapshot(
     run_status = "succeeded"
     if "RUN_FAILED" in facts:
         run_status = "failed"
-    elif "CANCELLED_RUN" in facts:
+    elif "RUN_CANCELLED" in facts:
         run_status = "cancelled"
 
     scheduled_at = _BASE_TIME + timedelta(days=scenario_index)

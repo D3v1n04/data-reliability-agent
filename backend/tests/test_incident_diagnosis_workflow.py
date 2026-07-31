@@ -19,6 +19,10 @@ from backend.app.services.incident_diagnosis_workflow import (
     IncidentNotFoundError,
     get_or_create_incident_diagnosis,
 )
+from backend.app.services.incident_memory_store import (
+    IncidentMemoryInput,
+    PreparedIncidentMemory,
+)
 
 
 INCIDENT_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -103,6 +107,29 @@ def make_generated_diagnosis() -> GeneratedIncidentDiagnosis:
             ],
             "similar_incidents": [],
         },
+    )
+
+
+def make_memory_input() -> IncidentMemoryInput:
+    return IncidentMemoryInput(
+        incident_id=INCIDENT_ID,
+        incident_snapshot={"schema_version": 1},
+        embedding_input="deterministic incident evidence",
+    )
+
+
+def make_prepared_memory(
+    *,
+    needs_persistence: bool = True,
+) -> PreparedIncidentMemory:
+    memory_input = make_memory_input()
+    return PreparedIncidentMemory(
+        incident_id=memory_input.incident_id,
+        incident_snapshot=memory_input.incident_snapshot,
+        embedding_input=memory_input.embedding_input,
+        embedding=[0.0] * 255 + [1.0],
+        embedding_model_id="amazon.titan-embed-text-v2:0",
+        needs_persistence=needs_persistence,
     )
 
 
@@ -212,12 +239,8 @@ def test_creates_and_commits_diagnosis(
 
     bedrock_service = Mock(spec=BedrockService)
 
-    memory = SimpleNamespace(
-        incident_snapshot={
-            "schema_version": 1,
-        },
-        embedding=[0.0] * 255 + [1.0],
-    )
+    memory_input = make_memory_input()
+    prepared_memory = make_prepared_memory()
     generated_diagnosis = make_generated_diagnosis()
 
     with (
@@ -225,10 +248,26 @@ def test_creates_and_commits_diagnosis(
             (
                 "backend.app.services."
                 "incident_diagnosis_workflow."
-                "get_or_create_incident_memory"
+                "load_incident_memory"
             ),
-            return_value=memory,
-        ) as create_memory,
+            return_value=None,
+        ) as load_memory,
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "build_incident_memory_input"
+            ),
+            return_value=memory_input,
+        ) as build_memory_input,
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "generate_incident_memory"
+            ),
+            return_value=prepared_memory,
+        ) as generate_memory,
         patch(
             (
                 "backend.app.services."
@@ -245,6 +284,13 @@ def test_creates_and_commits_diagnosis(
             ),
             return_value=generated_diagnosis,
         ) as generate_diagnosis,
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "persist_incident_memory"
+            ),
+        ) as persist_memory,
     ):
         result = get_or_create_incident_diagnosis(
             db=db,
@@ -263,23 +309,37 @@ def test_creates_and_commits_diagnosis(
         "amazon.nova-lite-v1:0"
     )
 
-    create_memory.assert_called_once()
+    load_memory.assert_called_once_with(
+        db=db,
+        incident_id=INCIDENT_ID,
+    )
+    build_memory_input.assert_called_once()
+    generate_memory.assert_called_once_with(
+        memory_input=memory_input,
+        bedrock_service=bedrock_service,
+        settings=settings,
+    )
     find_similar.assert_called_once_with(
         db=db,
-        embedding=memory.embedding,
+        embedding=prepared_memory.embedding,
         exclude_incident_id=INCIDENT_ID,
         settings=settings,
     )
     generate_diagnosis.assert_called_once_with(
-        incident_snapshot=memory.incident_snapshot,
+        incident_snapshot=prepared_memory.incident_snapshot,
         similar_memories=[],
         bedrock_service=bedrock_service,
+    )
+    persist_memory.assert_called_once_with(
+        db,
+        prepared_memory,
     )
 
     db.add.assert_called_once_with(result.diagnosis)
     db.flush.assert_called_once()
     db.commit.assert_called_once()
     db.refresh.assert_called_once_with(result.diagnosis)
+    assert db.rollback.call_count == 2
 
 
 def test_rolls_back_when_generation_fails(
@@ -297,21 +357,33 @@ def test_rolls_back_when_generation_fails(
 
     bedrock_service = Mock(spec=BedrockService)
 
-    memory = SimpleNamespace(
-        incident_snapshot={
-            "schema_version": 1,
-        },
-        embedding=[0.0] * 255 + [1.0],
-    )
+    memory_input = make_memory_input()
+    prepared_memory = make_prepared_memory()
 
     with (
         patch(
             (
                 "backend.app.services."
                 "incident_diagnosis_workflow."
-                "get_or_create_incident_memory"
+                "load_incident_memory"
             ),
-            return_value=memory,
+            return_value=None,
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "build_incident_memory_input"
+            ),
+            return_value=memory_input,
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "generate_incident_memory"
+            ),
+            return_value=prepared_memory,
         ),
         patch(
             (
@@ -343,9 +415,88 @@ def test_rolls_back_when_generation_fails(
                 settings=settings,
             )
 
-    db.rollback.assert_called_once()
+    assert db.rollback.call_count == 3
     db.add.assert_not_called()
     db.commit.assert_not_called()
+
+
+def test_deadline_exhaustion_after_nova_prevents_persistence(
+    settings: Settings,
+) -> None:
+    incident, pipeline_run, pipeline = make_context()
+    db = Mock(spec=Session)
+    db.scalar.return_value = None
+    db.get.side_effect = [incident, pipeline_run, pipeline]
+    bedrock_service = Mock(spec=BedrockService)
+    clock = Mock(side_effect=[0.0, 0.0, 0.0, 0.0, 21.0])
+
+    with (
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "load_incident_memory"
+            ),
+            return_value=None,
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "build_incident_memory_input"
+            ),
+            return_value=make_memory_input(),
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "generate_incident_memory"
+            ),
+            return_value=make_prepared_memory(),
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "find_similar_incident_memories"
+            ),
+            return_value=[],
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "generate_incident_diagnosis"
+            ),
+            return_value=make_generated_diagnosis(),
+        ) as generate_diagnosis,
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "persist_incident_memory"
+            ),
+        ) as persist_memory,
+        pytest.raises(
+            IncidentDiagnosisWorkflowError,
+            match="Unable to generate incident diagnosis",
+        ) as exc_info,
+    ):
+        get_or_create_incident_diagnosis(
+            db=db,
+            incident_id=INCIDENT_ID,
+            bedrock_service=bedrock_service,
+            settings=settings,
+            clock=clock,
+        )
+
+    assert exc_info.value.category == "bedrock"
+    generate_diagnosis.assert_called_once()
+    persist_memory.assert_not_called()
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+    assert db.rollback.call_count == 3
 
 
 def test_recovers_from_concurrent_duplicate_diagnosis(
@@ -355,10 +506,7 @@ def test_recovers_from_concurrent_duplicate_diagnosis(
     concurrent_diagnosis = make_existing_diagnosis()
 
     db = Mock(spec=Session)
-    db.scalar.side_effect = [
-        None,
-        concurrent_diagnosis,
-    ]
+    db.scalar.side_effect = [None, None, concurrent_diagnosis]
     db.get.side_effect = [
         incident,
         pipeline_run,
@@ -373,11 +521,8 @@ def test_recovers_from_concurrent_duplicate_diagnosis(
 
     bedrock_service = Mock(spec=BedrockService)
 
-    memory = SimpleNamespace(
-        incident_snapshot={
-            "schema_version": 1,
-        },
-        embedding=[0.0] * 255 + [1.0],
+    prepared_memory = make_prepared_memory(
+        needs_persistence=False,
     )
 
     with (
@@ -385,9 +530,9 @@ def test_recovers_from_concurrent_duplicate_diagnosis(
             (
                 "backend.app.services."
                 "incident_diagnosis_workflow."
-                "get_or_create_incident_memory"
+                "load_incident_memory"
             ),
-            return_value=memory,
+            return_value=prepared_memory,
         ),
         patch(
             (
@@ -415,6 +560,70 @@ def test_recovers_from_concurrent_duplicate_diagnosis(
 
     assert result.diagnosis is concurrent_diagnosis
     assert result.created is False
-    assert db.scalar.call_count == 2
+    assert db.scalar.call_count == 3
     db.commit.assert_called_once()
+    assert db.rollback.call_count == 2
+    db.refresh.assert_called_once_with(concurrent_diagnosis)
+
+
+def test_returns_concurrent_diagnosis_found_before_final_write(
+    settings: Settings,
+) -> None:
+    incident, pipeline_run, pipeline = make_context()
+    concurrent_diagnosis = make_existing_diagnosis()
+    prepared_memory = make_prepared_memory(
+        needs_persistence=False,
+    )
+    db = Mock(spec=Session)
+    db.scalar.side_effect = [None, concurrent_diagnosis]
+    db.get.side_effect = [incident, pipeline_run, pipeline]
+    bedrock_service = Mock(spec=BedrockService)
+
+    with (
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "load_incident_memory"
+            ),
+            return_value=prepared_memory,
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "find_similar_incident_memories"
+            ),
+            return_value=[],
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "generate_incident_diagnosis"
+            ),
+            return_value=make_generated_diagnosis(),
+        ) as generate_diagnosis,
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "persist_incident_memory"
+            ),
+        ) as persist_memory,
+    ):
+        result = get_or_create_incident_diagnosis(
+            db=db,
+            incident_id=INCIDENT_ID,
+            bedrock_service=bedrock_service,
+            settings=settings,
+        )
+
+    assert result.diagnosis is concurrent_diagnosis
+    assert result.created is False
+    generate_diagnosis.assert_called_once()
+    persist_memory.assert_not_called()
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+    assert db.rollback.call_count == 3
     db.refresh.assert_called_once_with(concurrent_diagnosis)

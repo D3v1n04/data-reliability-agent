@@ -100,6 +100,9 @@ export function getIncidents(
   if (filters.source?.trim()) {
     params.set("source", filters.source.trim());
   }
+  if (filters.pipeline_run_id) {
+    params.set("pipeline_run_id", filters.pipeline_run_id);
+  }
 
   return request(`/api/incidents?${params.toString()}`);
 }

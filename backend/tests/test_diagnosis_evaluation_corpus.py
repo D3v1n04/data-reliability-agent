@@ -117,7 +117,7 @@ def test_deterministic_facts_use_only_allowed_rules() -> None:
         "DURATION_EXCEEDED",
         "ROW_COUNT_BELOW_MINIMUM",
         "QUALITY_CHECKS_FAILED",
-        "CANCELLED_RUN",
+        "RUN_CANCELLED",
     }
 
     assert all(
@@ -136,6 +136,33 @@ def test_every_reference_diagnosis_passes_its_case() -> None:
     ]
 
     assert all(result.passed for result in results)
+
+
+def test_cancelled_run_reference_requires_canonical_fact() -> None:
+    scenario = scenario_named("An irrelevant similar incident")
+
+    assert scenario.deterministic_facts == ("RUN_CANCELLED",)
+    assert scenario.evaluation_case.required_facts == ("RUN_CANCELLED",)
+    reference_result = evaluate_diagnosis(
+        scenario.evaluation_case,
+        scenario.reference_diagnosis,
+    )
+    stale_diagnosis = type(scenario.reference_diagnosis)(
+        explanation="CANCELLED_RUN was observed.",
+        likely_causes=scenario.reference_diagnosis.likely_causes,
+        recommendations=scenario.reference_diagnosis.recommendations,
+        confidence=scenario.reference_diagnosis.confidence,
+    )
+    stale_result = evaluate_diagnosis(
+        scenario.evaluation_case,
+        stale_diagnosis,
+    )
+
+    assert reference_result.passed
+    assert reference_result.missing_required_facts == ()
+    assert stale_result.missing_required_facts == ("RUN_CANCELLED",)
+    assert stale_result.grounding_score == 0.0
+    assert not stale_result.passed
 
 
 def test_all_reference_confidences_obey_explicit_case_ceilings() -> None:
@@ -300,7 +327,7 @@ def test_similar_incident_cause_is_not_current_evidence() -> None:
     scenario = scenario_named("An irrelevant similar incident")
     diagnosis = type(scenario.reference_diagnosis)(
         explanation=(
-            "CANCELLED_RUN occurred, caused by a source pause."
+            "RUN_CANCELLED occurred, caused by a source pause."
         ),
         likely_causes=(),
         recommendations=scenario.reference_diagnosis.recommendations,
@@ -317,7 +344,7 @@ def test_similar_incident_cause_is_not_current_evidence() -> None:
 def test_rejecting_source_pause_but_repeating_it_fails() -> None:
     scenario = scenario_named("An irrelevant similar incident")
     diagnosis = type(scenario.reference_diagnosis)(
-        explanation="CANCELLED_RUN is authoritative; source pause is not.",
+        explanation="RUN_CANCELLED is authoritative; source pause is not.",
         likely_causes=(
             "The available evidence is insufficient; source pause is not"
             " established as the current cause.",
@@ -389,7 +416,7 @@ def test_challenging_authoritative_failure_determination_fails() -> None:
 def test_in_limit_start_delay_cannot_contribute_to_cancellation() -> None:
     scenario = scenario_named("An irrelevant similar incident")
     diagnosis = type(scenario.reference_diagnosis)(
-        explanation="CANCELLED_RUN was observed.",
+        explanation="RUN_CANCELLED was observed.",
         likely_causes=(
             "The available evidence is insufficient; the in-limit start"
             " delay contributed to cancellation.",

@@ -1,8 +1,13 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+DIAGNOSIS_BEDROCK_PHASE_COUNT = 2
+MIN_DIAGNOSIS_OVERHEAD_RESERVE_SECONDS = 6
+MIN_LAMBDA_SAFETY_MARGIN_SECONDS = 5
 
 
 class Settings(BaseSettings):
@@ -24,16 +29,18 @@ class Settings(BaseSettings):
     bedrock_embedding_model_id: str = "amazon.titan-embed-text-v2:0"
     bedrock_embedding_dimensions: int = Field(default=256, ge=1)
     bedrock_connect_timeout_seconds: int = Field(
-        default=3,
+        default=2,
         ge=1,
         le=10,
     )
     bedrock_read_timeout_seconds: int = Field(
-        default=20,
+        default=5,
         ge=1,
         le=30,
     )
-    aws_max_attempts: int = Field(default=2, ge=1, le=3)
+    aws_total_max_attempts: int = Field(default=1, ge=1, le=3)
+    diagnosis_timeout_seconds: int = Field(default=20, ge=1, le=60)
+    lambda_timeout_seconds: int = Field(default=25, ge=1, le=900)
 
     similar_incident_limit: int = Field(default=5, ge=1, le=20)
     cors_allowed_origins: str = (
@@ -65,6 +72,56 @@ class Settings(BaseSettings):
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     metrics_namespace: str = "DataReliabilityAgent"
+
+    @property
+    def diagnosis_inference_socket_budget_seconds(self) -> int:
+        """Return the aggregate connect/read budget for Titan and Nova."""
+        return (
+            DIAGNOSIS_BEDROCK_PHASE_COUNT
+            * self.aws_total_max_attempts
+            * (
+                self.bedrock_connect_timeout_seconds
+                + self.bedrock_read_timeout_seconds
+            )
+        )
+
+    @property
+    def diagnosis_overhead_reserve_seconds(self) -> int:
+        """Return time reserved for database and application work."""
+        return (
+            self.diagnosis_timeout_seconds
+            - self.diagnosis_inference_socket_budget_seconds
+        )
+
+    @property
+    def lambda_safety_margin_seconds(self) -> int:
+        """Return time reserved before Lambda termination."""
+        return (
+            self.lambda_timeout_seconds
+            - self.diagnosis_timeout_seconds
+        )
+
+    @model_validator(mode="after")
+    def validate_diagnosis_timeout_budget(self) -> Self:
+        if (
+            self.diagnosis_overhead_reserve_seconds
+            < MIN_DIAGNOSIS_OVERHEAD_RESERVE_SECONDS
+        ):
+            raise ValueError(
+                "Diagnosis timeout must reserve at least 6 seconds "
+                "beyond the aggregate Bedrock connect/read budget"
+            )
+
+        if (
+            self.lambda_safety_margin_seconds
+            < MIN_LAMBDA_SAFETY_MARGIN_SECONDS
+        ):
+            raise ValueError(
+                "Diagnosis timeout must remain at least 5 seconds below "
+                "the Lambda timeout"
+            )
+
+        return self
 
     @property
     def allowed_origins(self) -> list[str]:

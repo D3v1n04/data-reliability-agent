@@ -13,6 +13,7 @@ from backend.app.services.bedrock import BedrockService
 from backend.app.services.incident_memory_store import (
     find_similar_incident_memories,
     get_or_create_incident_memory,
+    load_incident_memory,
 )
 
 
@@ -196,6 +197,26 @@ def test_returns_existing_memory_without_bedrock_call(
     bedrock_service.generate_embedding.assert_not_called()
     db.add.assert_not_called()
     db.flush.assert_not_called()
+
+
+def test_loads_existing_memory_into_detached_values() -> None:
+    existing_memory = make_existing_memory()
+    existing_memory.incident_id = INCIDENT_ID
+    db = Mock(spec=Session)
+    db.scalar.return_value = existing_memory
+
+    result = load_incident_memory(
+        db=db,
+        incident_id=INCIDENT_ID,
+    )
+
+    assert result is not None
+    assert result.incident_id == INCIDENT_ID
+    assert result.incident_snapshot == existing_memory.incident_snapshot
+    assert result.incident_snapshot is not existing_memory.incident_snapshot
+    assert result.embedding == existing_memory.embedding
+    assert result.embedding is not existing_memory.embedding
+    assert result.needs_persistence is False
 
 
 def test_recovers_from_concurrent_duplicate(

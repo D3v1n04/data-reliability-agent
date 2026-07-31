@@ -19,6 +19,17 @@ The SAM stack creates:
   database failure alarms.
 - An optional SNS email subscription when `ALARM_NOTIFICATION_EMAIL` is set.
 
+Diagnosis has a 20-second monotonic application deadline within Lambda's
+25-second timeout. Titan and Nova each use one total attempt with a 2-second
+connect timeout and 5-second read timeout, for a 14-second aggregate configured
+socket-timeout budget. The remaining 6 seconds inside the diagnosis budget are
+reserved for database and application work, with 5 more seconds reserved before
+Lambda termination. Using one total attempt means there is no SDK retry backoff
+in this path. These values are configured limits, not measured production
+latency. Deadline checks occur between synchronous phases and cannot cancel an
+SDK operation already in progress; connect/read timeouts bound individual
+socket waits rather than total wall-clock duration.
+
 Lambda stays outside a VPC to avoid the fixed cost of a NAT Gateway. It connects
 to CockroachDB's public endpoint using verified TLS, the restricted `dra_app`
 user, a pool of one connection per Lambda environment, and bounded connection
@@ -95,7 +106,14 @@ aws sts get-caller-identity \
   --region us-east-1
 ```
 
-Run database migrations with `dra_admin` before deployment:
+Phase 9 adds a CockroachDB cosine vector index. Before applying that migration,
+enable vector indexes once from a cluster-administrator SQL session:
+
+```sql
+SET CLUSTER SETTING feature.vector_index.enabled = true;
+```
+
+Then run database migrations with `dra_admin` before deployment:
 
 ```bash
 source .venv/bin/activate
@@ -177,11 +195,14 @@ that the vulnerable path exists only in unstable React Server Component APIs.
 This application is a declarative, client-only Vite SPA and has no RSC server
 or server actions.
 
-As of July 29, 2026, the npm audit feed may still report the advisory against
-7.18.2 and say that no fix is available. Treat that result as an upstream
-metadata discrepancy, not as permission to ignore future advisories. Recheck
-the maintainer advisory and npm audit before every deployment, and remove this
-documented exception when the feeds converge.
+As of July 31, 2026, the npm audit feed still reports the advisory against
+7.18.2. The upstream React Router maintainer advisory identifies 7.18.2 as the
+patched 7.x release and limits the affected path to unstable RSC APIs; this
+client-only Vite SPA uses neither RSC routes nor server actions. Treat the
+nonzero audit as a narrowly documented upstream metadata discrepancy, not as
+permission to ignore future advisories. Recheck the maintainer advisory and
+npm audit before every deployment, and remove this exception when the feeds
+converge or if the frontend architecture changes.
 
 ## Deploy
 

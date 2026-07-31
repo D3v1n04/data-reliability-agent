@@ -92,6 +92,7 @@ def list_incidents(
         str | None,
         Query(min_length=1, max_length=100),
     ] = None,
+    pipeline_run_id: UUID | None = None,
     limit: Annotated[
         int,
         Query(ge=1, le=100),
@@ -116,6 +117,11 @@ def list_incidents(
     if source is not None:
         statement = statement.where(
             Incident.source == source
+        )
+
+    if pipeline_run_id is not None:
+        statement = statement.where(
+            Incident.pipeline_run_id == pipeline_run_id
         )
 
     statement = (

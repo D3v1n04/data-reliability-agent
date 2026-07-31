@@ -84,6 +84,7 @@ export interface IncidentFilters {
   status?: IncidentStatus | "";
   severity?: Severity | "";
   source?: string;
+  pipeline_run_id?: string;
   limit?: number;
   offset?: number;
 }
