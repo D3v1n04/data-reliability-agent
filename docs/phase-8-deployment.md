@@ -95,7 +95,14 @@ aws sts get-caller-identity \
   --region us-east-1
 ```
 
-Run database migrations with `dra_admin` before deployment:
+Phase 9 adds a CockroachDB cosine vector index. Before applying that migration,
+enable vector indexes once from a cluster-administrator SQL session:
+
+```sql
+SET CLUSTER SETTING feature.vector_index.enabled = true;
+```
+
+Then run database migrations with `dra_admin` before deployment:
 
 ```bash
 source .venv/bin/activate
@@ -177,11 +184,14 @@ that the vulnerable path exists only in unstable React Server Component APIs.
 This application is a declarative, client-only Vite SPA and has no RSC server
 or server actions.
 
-As of July 29, 2026, the npm audit feed may still report the advisory against
-7.18.2 and say that no fix is available. Treat that result as an upstream
-metadata discrepancy, not as permission to ignore future advisories. Recheck
-the maintainer advisory and npm audit before every deployment, and remove this
-documented exception when the feeds converge.
+As of July 31, 2026, the npm audit feed still reports the advisory against
+7.18.2. The upstream React Router maintainer advisory identifies 7.18.2 as the
+patched 7.x release and limits the affected path to unstable RSC APIs; this
+client-only Vite SPA uses neither RSC routes nor server actions. Treat the
+nonzero audit as a narrowly documented upstream metadata discrepancy, not as
+permission to ignore future advisories. Recheck the maintainer advisory and
+npm audit before every deployment, and remove this exception when the feeds
+converge or if the frontend architecture changes.
 
 ## Deploy
 
