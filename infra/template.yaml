@@ -70,6 +70,7 @@ Globals:
         DATABASE_STATEMENT_TIMEOUT_MS: "10000"
         LOG_LEVEL: INFO
         METRICS_NAMESPACE: DataReliabilityAgent
+        PGSSLROOTCERT: /var/task/backend/certs/cockroach-cloud-root.crt
 
 Resources:
   HttpApi:
@@ -159,6 +160,29 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  FrontendSpaRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      AutoPublish: true
+      Name: !Sub ${AWS::StackName}-frontend-spa-rewrite
+      FunctionConfig:
+        Comment: Rewrite React frontend routes to index.html
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+
+          if (
+            (request.method === 'GET' || request.method === 'HEAD') &&
+            !uri.includes('.')
+          ) {
+            request.uri = '/index.html';
+          }
+
+          return request;
+        }
+
   FrontendDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -193,6 +217,9 @@ Resources:
             - HEAD
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
           Compress: true
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt FrontendSpaRewriteFunction.FunctionARN
           TargetOriginId: FrontendS3
           ViewerProtocolPolicy: redirect-to-https
         CacheBehaviors:
@@ -239,15 +266,6 @@ Resources:
             OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
             TargetOriginId: BackendHttpApi
             ViewerProtocolPolicy: redirect-to-https
-        CustomErrorResponses:
-          - ErrorCode: 403
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 0
-          - ErrorCode: 404
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 0
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
 
