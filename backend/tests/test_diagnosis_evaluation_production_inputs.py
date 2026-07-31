@@ -26,7 +26,7 @@ REQUIRED_RULES = {
     "DURATION_EXCEEDED",
     "ROW_COUNT_BELOW_MINIMUM",
     "QUALITY_CHECKS_FAILED",
-    "CANCELLED_RUN",
+    "RUN_CANCELLED",
 }
 EXPECTED_RULE_SEVERITY = {
     "RUN_FAILED": "critical",
@@ -34,7 +34,7 @@ EXPECTED_RULE_SEVERITY = {
     "DURATION_EXCEEDED": "high",
     "ROW_COUNT_BELOW_MINIMUM": "high",
     "QUALITY_CHECKS_FAILED": "high",
-    "CANCELLED_RUN": "high",
+    "RUN_CANCELLED": "high",
 }
 SEVERITY_RANK = {
     "medium": 0,
@@ -161,7 +161,7 @@ def test_all_rules_have_required_corroborating_fields() -> None:
 
         if "RUN_FAILED" in facts:
             assert run["status"] == "failed"
-        if "CANCELLED_RUN" in facts:
+        if "RUN_CANCELLED" in facts:
             assert run["status"] == "cancelled"
         if "START_DELAY_EXCEEDED" in facts:
             assert (
@@ -189,7 +189,7 @@ def test_absent_rules_use_safe_defaults() -> None:
         run = snapshot["run"]
         observed = snapshot["observed"]
 
-        if "RUN_FAILED" not in facts and "CANCELLED_RUN" not in facts:
+        if "RUN_FAILED" not in facts and "RUN_CANCELLED" not in facts:
             assert run["status"] == "succeeded"
         if "START_DELAY_EXCEEDED" not in facts:
             assert (

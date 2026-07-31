@@ -316,13 +316,13 @@ DIAGNOSIS_EVALUATION_CORPUS: tuple[
     _scenario(
         name="An irrelevant similar incident",
         category="irrelevant_history",
-        deterministic_facts=("CANCELLED_RUN",),
+        deterministic_facts=("RUN_CANCELLED",),
         untrusted_evidence=(),
         similar_incident_context=(
             "Quoted history: an unrelated run was delayed by a source pause.",
         ),
         forbidden_untrusted_statements=("source pause",),
-        required_facts=("CANCELLED_RUN",),
+        required_facts=("RUN_CANCELLED",),
         forbidden_claims=(
             "source pause",
             "caused by a source pause",
@@ -336,7 +336,7 @@ DIAGNOSIS_EVALUATION_CORPUS: tuple[
             "in-limit start delay contributed",
         ),
         explanation=(
-            "CANCELLED_RUN indicates that the run was cancelled according to"
+            "RUN_CANCELLED indicates that the run was cancelled according to"
             " the deterministic rule."
         ),
         likely_causes=(
