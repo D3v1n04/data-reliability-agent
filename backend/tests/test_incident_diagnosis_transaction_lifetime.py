@@ -1,11 +1,10 @@
-"""Characterize the diagnosis workflow's current connection lifetime.
+"""Regress the diagnosis workflow's optimized connection lifetime.
 
 SQLite validates SQLAlchemy Session autobegin, transaction, and QueuePool
 mechanics while the real diagnosis workflow runs. It does not model
 CockroachDB latency, contention, isolation, retries, or vector execution.
-These tests intentionally capture the current long checkout across mocked
-Titan and Nova calls so a later transaction-boundary change has a deterministic
-before-state.
+These tests prove that mocked Titan and Nova calls occur without a transaction
+or checkout while preserving atomic memory and diagnosis persistence.
 """
 
 from dataclasses import dataclass, field
@@ -15,6 +14,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import Engine, create_engine, event, func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
 
@@ -133,6 +133,7 @@ class LifetimeHarness:
     timeline: list[str] = field(default_factory=list)
     stages: list[StageObservation] = field(default_factory=list)
     record_events: bool = True
+    fail_diagnosis_insert: bool = False
 
     def observe(self, name: str) -> None:
         checked_out = self.engine.pool.checkedout()  # type: ignore[attr-defined]
@@ -283,6 +284,17 @@ def lifetime_harness() -> LifetimeHarness:
             operation = statement.lstrip().split(None, 1)[0].lower()
             harness.observe(f"sql_{operation}")
 
+            if operation == "insert" and "incident_memories" in statement:
+                harness.observe("insert_memory")
+
+            if operation == "insert" and "incident_diagnoses" in statement:
+                harness.observe("insert_diagnosis")
+
+                if harness.fail_diagnosis_insert:
+                    raise SQLAlchemyError(
+                        "Injected diagnosis persistence failure"
+                    )
+
     event.listen(engine, "checkout", record_checkout)
     event.listen(engine, "checkin", record_checkin)
     event.listen(engine, "before_cursor_execute", record_sql)
@@ -348,7 +360,7 @@ def _stored_counts(engine: Engine) -> tuple[int, int]:
     return int(memory_count or 0), int(diagnosis_count or 0)
 
 
-def test_success_holds_checkout_across_titan_and_nova_then_refreshes(
+def test_success_releases_checkouts_during_titan_and_nova_then_refreshes(
     lifetime_harness: LifetimeHarness,
 ) -> None:
     harness = lifetime_harness
@@ -381,29 +393,53 @@ def test_success_holds_checkout_across_titan_and_nova_then_refreshes(
         in_transaction=True,
         checked_out=1,
     )
-    assert harness.stage("during_titan") == StageObservation(
-        name="during_titan",
-        in_transaction=True,
-        checked_out=1,
+    initial_checkin = harness.timeline.index("pool_checkin")
+    titan = harness.timeline.index("during_titan")
+    similar_checkout = harness.timeline.index("pool_checkout", 1)
+    similar_checkin = harness.timeline.index(
+        "pool_checkin",
+        initial_checkin + 1,
     )
-    assert harness.stage("during_nova") == StageObservation(
-        name="during_nova",
-        in_transaction=True,
-        checked_out=1,
+    nova = harness.timeline.index("during_nova")
+    write_checkout = harness.timeline.index(
+        "pool_checkout",
+        similar_checkout + 1,
     )
 
-    first_checkin = harness.timeline.index("pool_checkin")
-    second_checkout = harness.timeline.index("pool_checkout", 1)
-    assert harness.timeline.index("during_nova") < first_checkin
-    assert first_checkin < second_checkout
+    assert initial_checkin < titan < similar_checkout
+    assert harness.stage("during_titan") == StageObservation(
+        name="during_titan",
+        in_transaction=False,
+        checked_out=0,
+    )
+    assert harness.stage("after_similar_select") == StageObservation(
+        name="after_similar_select",
+        in_transaction=True,
+        checked_out=1,
+    )
+    assert similar_checkin < nova < write_checkout
+    assert harness.stage("during_nova") == StageObservation(
+        name="during_nova",
+        in_transaction=False,
+        checked_out=0,
+    )
+    assert write_checkout < harness.timeline.index("insert_memory")
+    assert harness.timeline.index("insert_memory") < harness.timeline.index(
+        "insert_diagnosis"
+    )
+
+    refresh_checkout = harness.timeline.index(
+        "pool_checkout",
+        write_checkout + 1,
+    )
     assert harness.timeline[
-        second_checkout : second_checkout + 3
+        refresh_checkout : refresh_checkout + 3
     ] == [
         "pool_checkout",
         "sql_begin",
         "sql_select",
     ]
-    assert second_checkout < harness.timeline.index("workflow_returned")
+    assert refresh_checkout < harness.timeline.index("workflow_returned")
     assert harness.stage("workflow_returned") == StageObservation(
         name="workflow_returned",
         in_transaction=True,
@@ -413,8 +449,8 @@ def test_success_holds_checkout_across_titan_and_nova_then_refreshes(
     harness.session.close()
     harness.observe("after_session_close")
 
-    assert harness.timeline.count("pool_checkout") == 2
-    assert harness.timeline.count("pool_checkin") == 2
+    assert harness.timeline.count("pool_checkout") == 4
+    assert harness.timeline.count("pool_checkin") == 4
     assert harness.stage("after_session_close") == StageObservation(
         name="after_session_close",
         in_transaction=False,
@@ -456,17 +492,62 @@ def test_nova_failure_rolls_back_memory_and_returns_checkout(
 
     harness.observe("after_workflow_rollback")
 
-    assert harness.stage("during_titan").in_transaction is True
-    assert harness.stage("during_titan").checked_out == 1
-    assert harness.stage("during_nova").in_transaction is True
-    assert harness.stage("during_nova").checked_out == 1
-    assert harness.timeline.index("during_nova") < harness.timeline.index(
-        "pool_checkin"
-    )
-    assert harness.timeline.count("pool_checkout") == 1
-    assert harness.timeline.count("pool_checkin") == 1
+    assert harness.stage("during_titan").in_transaction is False
+    assert harness.stage("during_titan").checked_out == 0
+    assert harness.stage("during_nova").in_transaction is False
+    assert harness.stage("during_nova").checked_out == 0
+    assert harness.timeline.count("pool_checkout") == 2
+    assert harness.timeline.count("pool_checkin") == 2
     assert harness.stage("after_workflow_rollback") == StageObservation(
         name="after_workflow_rollback",
+        in_transaction=False,
+        checked_out=0,
+    )
+
+    harness.stop_recording()
+    assert _stored_counts(harness.engine) == (0, 0)
+
+
+def test_final_diagnosis_insert_failure_rolls_back_memory_and_diagnosis(
+    lifetime_harness: LifetimeHarness,
+) -> None:
+    harness = lifetime_harness
+    harness.fail_diagnosis_insert = True
+    bedrock_service = _mock_bedrock(harness)
+
+    with (
+        patch(
+            (
+                "backend.app.services.incident_diagnosis_workflow."
+                "find_similar_incident_memories"
+            ),
+            side_effect=_find_no_similar_memories(harness),
+        ),
+        pytest.raises(
+            IncidentDiagnosisWorkflowError,
+            match="Unable to store incident diagnosis",
+        ),
+    ):
+        get_or_create_incident_diagnosis(
+            db=harness.session,
+            incident_id=INCIDENT_ID,
+            bedrock_service=bedrock_service,
+            settings=harness.settings,
+        )
+
+    harness.observe("after_persistence_rollback")
+
+    assert harness.stage("during_titan").checked_out == 0
+    assert harness.stage("during_nova").checked_out == 0
+    assert harness.timeline.index("insert_memory") < harness.timeline.index(
+        "insert_diagnosis"
+    )
+    assert harness.stage("insert_memory").in_transaction is True
+    assert harness.stage("insert_diagnosis").in_transaction is True
+    assert harness.timeline.count("pool_checkout") == 3
+    assert harness.timeline.count("pool_checkin") == 3
+    assert harness.stage("after_persistence_rollback") == StageObservation(
+        name="after_persistence_rollback",
         in_transaction=False,
         checked_out=0,
     )
@@ -516,3 +597,6 @@ def test_existing_diagnosis_skips_titan_and_nova(
     harness.session.close()
     assert harness.timeline.count("pool_checkout") == 1
     assert harness.timeline.count("pool_checkin") == 1
+
+    harness.stop_recording()
+    assert _stored_counts(harness.engine) == (0, 1)
