@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -196,7 +197,8 @@ def test_post_returns_503_and_logs_workflow_failure(
 
     try:
         raise IncidentDiagnosisWorkflowError(
-            "Unable to generate incident diagnosis"
+            "Unable to generate incident diagnosis",
+            category="bedrock",
         ) from underlying_error
     except IncidentDiagnosisWorkflowError as workflow_error:
         chained_error = workflow_error
@@ -233,7 +235,11 @@ def test_post_returns_503_and_logs_workflow_failure(
     )
     assert str(INCIDENT_ID) not in caplog.text
     assert "underlying failure" not in caplog.text
-    assert "underlying failure" not in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "underlying failure" not in captured.out
+    metric = json.loads(captured.out)
+    assert metric["BedrockFailures"] == 1
+    assert caplog.records[0].failure_category == "bedrock"
 
 
 def test_get_returns_stored_diagnosis() -> None:

@@ -57,7 +57,7 @@ a universal semantic-safety guarantee.
 | Edge | CloudFront HTTPS, private S3 bucket, Origin Access Control |
 | API | API Gateway rate 2 requests/second, burst 5 |
 | Compute | Lambda timeout 25 seconds, reserved concurrency 2 |
-| Model calls | Connect/read timeouts, two attempts, fixed embedding dimensions |
+| Model calls | One total attempt per call, 2-second connect and 5-second read bounds, fixed embedding dimensions |
 | Logs | Structured metadata only; no bodies, prompts, evidence, diagnoses, URLs, or exception chains |
 | Monitoring | Lambda, API, database, Bedrock, throttle, and duration alarms |
 
@@ -69,6 +69,14 @@ a universal semantic-safety guarantee.
   CockroachDB network rule may allow public ingress, while authentication,
   least privilege, and verified TLS remain enforced.
 - Similarity is evidence retrieval, not proof of causality.
+- Diagnosis has a 20-second application budget inside the 25-second Lambda
+  timeout. The two model calls have a 14-second aggregate configured
+  socket-timeout budget, reserving 6 seconds for database and application work
+  and a 5-second Lambda safety margin. Boundary checks cannot interrupt an
+  in-progress synchronous SDK call; connect/read timeouts bound individual
+  socket waits rather than total wall-clock duration.
+- These timeout values are configured safety limits, not measurements of live
+  Bedrock latency, API Gateway behavior, or end-user response time.
 - The deployment targets a controlled single-region demo. A real production
   rollout would add authentication, authorization, tenant isolation, and an
   organization-specific network design.

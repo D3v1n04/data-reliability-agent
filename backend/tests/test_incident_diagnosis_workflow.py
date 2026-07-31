@@ -420,6 +420,85 @@ def test_rolls_back_when_generation_fails(
     db.commit.assert_not_called()
 
 
+def test_deadline_exhaustion_after_nova_prevents_persistence(
+    settings: Settings,
+) -> None:
+    incident, pipeline_run, pipeline = make_context()
+    db = Mock(spec=Session)
+    db.scalar.return_value = None
+    db.get.side_effect = [incident, pipeline_run, pipeline]
+    bedrock_service = Mock(spec=BedrockService)
+    clock = Mock(side_effect=[0.0, 0.0, 0.0, 0.0, 21.0])
+
+    with (
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "load_incident_memory"
+            ),
+            return_value=None,
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "build_incident_memory_input"
+            ),
+            return_value=make_memory_input(),
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "generate_incident_memory"
+            ),
+            return_value=make_prepared_memory(),
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "find_similar_incident_memories"
+            ),
+            return_value=[],
+        ),
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "generate_incident_diagnosis"
+            ),
+            return_value=make_generated_diagnosis(),
+        ) as generate_diagnosis,
+        patch(
+            (
+                "backend.app.services."
+                "incident_diagnosis_workflow."
+                "persist_incident_memory"
+            ),
+        ) as persist_memory,
+        pytest.raises(
+            IncidentDiagnosisWorkflowError,
+            match="Unable to generate incident diagnosis",
+        ) as exc_info,
+    ):
+        get_or_create_incident_diagnosis(
+            db=db,
+            incident_id=INCIDENT_ID,
+            bedrock_service=bedrock_service,
+            settings=settings,
+            clock=clock,
+        )
+
+    assert exc_info.value.category == "bedrock"
+    generate_diagnosis.assert_called_once()
+    persist_memory.assert_not_called()
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+    assert db.rollback.call_count == 3
+
+
 def test_recovers_from_concurrent_duplicate_diagnosis(
     settings: Settings,
 ) -> None:

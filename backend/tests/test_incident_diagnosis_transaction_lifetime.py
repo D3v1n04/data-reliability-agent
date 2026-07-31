@@ -126,6 +126,14 @@ class StageObservation:
 
 
 @dataclass
+class FakeClock:
+    current: float = 0.0
+
+    def __call__(self) -> float:
+        return self.current
+
+
+@dataclass
 class LifetimeHarness:
     engine: Engine
     session: Session
@@ -500,6 +508,177 @@ def test_nova_failure_rolls_back_memory_and_returns_checkout(
     assert harness.timeline.count("pool_checkin") == 2
     assert harness.stage("after_workflow_rollback") == StageObservation(
         name="after_workflow_rollback",
+        in_transaction=False,
+        checked_out=0,
+    )
+
+    harness.stop_recording()
+    assert _stored_counts(harness.engine) == (0, 0)
+
+
+def test_deadline_exhaustion_returns_checkouts_and_keeps_session_usable(
+    lifetime_harness: LifetimeHarness,
+) -> None:
+    harness = lifetime_harness
+    clock = FakeClock()
+    bedrock_service = _mock_bedrock(harness)
+    generate_structured_output = (
+        bedrock_service.generate_structured_output.side_effect
+    )
+
+    def expire_after_nova(**kwargs: object) -> dict[str, object]:
+        result = generate_structured_output(**kwargs)
+        clock.current = 21.0
+        return result
+
+    bedrock_service.generate_structured_output.side_effect = (
+        expire_after_nova
+    )
+
+    with (
+        patch(
+            (
+                "backend.app.services.incident_diagnosis_workflow."
+                "find_similar_incident_memories"
+            ),
+            side_effect=_find_no_similar_memories(harness),
+        ),
+        pytest.raises(IncidentDiagnosisWorkflowError) as exc_info,
+    ):
+        get_or_create_incident_diagnosis(
+            db=harness.session,
+            incident_id=INCIDENT_ID,
+            bedrock_service=bedrock_service,
+            settings=harness.settings,
+            clock=clock,
+        )
+
+    harness.observe("after_deadline")
+
+    assert exc_info.value.category == "bedrock"
+    assert harness.stage("during_titan").checked_out == 0
+    assert harness.stage("during_nova").checked_out == 0
+    assert harness.stage("after_deadline") == StageObservation(
+        name="after_deadline",
+        in_transaction=False,
+        checked_out=0,
+    )
+    assert harness.timeline.count("pool_checkout") == 2
+    assert harness.timeline.count("pool_checkin") == 2
+
+    harness.session.execute(text("SELECT 1")).all()
+    harness.session.rollback()
+    harness.observe("after_session_reuse")
+    assert harness.stage("after_session_reuse") == StageObservation(
+        name="after_session_reuse",
+        in_transaction=False,
+        checked_out=0,
+    )
+
+    harness.stop_recording()
+    assert _stored_counts(harness.engine) == (0, 0)
+
+
+def test_final_query_deadline_exhaustion_prevents_persistence(
+    lifetime_harness: LifetimeHarness,
+) -> None:
+    harness = lifetime_harness
+    clock = FakeClock()
+    bedrock_service = _mock_bedrock(harness)
+    diagnosis_select_count = 0
+
+    def expire_after_final_diagnosis_query(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        nonlocal diagnosis_select_count
+        normalized_statement = " ".join(statement.lower().split())
+        if (
+            normalized_statement.startswith("select")
+            and "from incident_diagnoses" in normalized_statement
+        ):
+            diagnosis_select_count += 1
+            if diagnosis_select_count == 2:
+                clock.current = 21.0
+
+    event.listen(
+        harness.engine,
+        "after_cursor_execute",
+        expire_after_final_diagnosis_query,
+    )
+
+    try:
+        with (
+            patch(
+                (
+                    "backend.app.services.incident_diagnosis_workflow."
+                    "find_similar_incident_memories"
+                ),
+                side_effect=_find_no_similar_memories(harness),
+            ),
+            patch.object(
+                harness.session,
+                "add",
+                wraps=harness.session.add,
+            ) as add,
+            patch.object(
+                harness.session,
+                "commit",
+                wraps=harness.session.commit,
+            ) as commit,
+            patch.object(
+                harness.session,
+                "rollback",
+                wraps=harness.session.rollback,
+            ) as rollback,
+            pytest.raises(IncidentDiagnosisWorkflowError) as exc_info,
+        ):
+            get_or_create_incident_diagnosis(
+                db=harness.session,
+                incident_id=INCIDENT_ID,
+                bedrock_service=bedrock_service,
+                settings=harness.settings,
+                clock=clock,
+            )
+    finally:
+        event.remove(
+            harness.engine,
+            "after_cursor_execute",
+            expire_after_final_diagnosis_query,
+        )
+
+    harness.observe("after_final_query_deadline")
+
+    assert exc_info.value.category == "bedrock"
+    assert diagnosis_select_count == 2
+    bedrock_service.generate_embedding.assert_called_once()
+    bedrock_service.generate_structured_output.assert_called_once()
+    add.assert_not_called()
+    commit.assert_not_called()
+    assert rollback.call_count == 3
+    assert "insert_memory" not in harness.timeline
+    assert "insert_diagnosis" not in harness.timeline
+    assert harness.timeline.count("pool_checkout") == 3
+    assert harness.timeline.count("pool_checkin") == 3
+    assert harness.stage(
+        "after_final_query_deadline"
+    ) == StageObservation(
+        name="after_final_query_deadline",
+        in_transaction=False,
+        checked_out=0,
+    )
+
+    harness.session.execute(text("SELECT 1")).all()
+    harness.session.rollback()
+    harness.observe("after_final_query_session_reuse")
+    assert harness.stage(
+        "after_final_query_session_reuse"
+    ) == StageObservation(
+        name="after_final_query_session_reuse",
         in_transaction=False,
         checked_out=0,
     )

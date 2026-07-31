@@ -232,6 +232,13 @@ The public demo has no end-user authentication and contains synthetic data
 only. It is a controlled judging environment, not a public multi-tenant
 service. See [security and trust](docs/security-and-trust.md).
 
+Diagnosis uses one total attempt per Bedrock operation with a 2-second connect
+timeout and 5-second read timeout. Titan and Nova therefore have a 14-second
+aggregate configured socket-timeout budget inside a 20-second diagnosis
+budget, leaving 6 seconds for application and database work and a further
+5-second margin before the 25-second Lambda timeout. These are configured
+limits, not measured production latency.
+
 ## Submission resources
 
 - [Architecture and memory workflow](docs/architecture.md)

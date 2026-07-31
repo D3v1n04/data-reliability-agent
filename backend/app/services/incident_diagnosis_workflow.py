@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
+from time import monotonic
 from uuid import UUID
 
 from sqlalchemy import select
@@ -149,14 +151,32 @@ def _end_read_transaction(
         ) from exc
 
 
+def _ensure_diagnosis_deadline(
+    db: Session,
+    deadline: float,
+    clock: Callable[[], float],
+) -> None:
+    """Fail through the controlled Bedrock path when budget is exhausted."""
+    if clock() < deadline:
+        return
+
+    db.rollback()
+    raise IncidentDiagnosisWorkflowError(
+        "Unable to generate incident diagnosis",
+        category="bedrock",
+    )
+
+
 def get_or_create_incident_diagnosis(
     db: Session,
     incident_id: UUID,
     bedrock_service: BedrockService,
     settings: Settings | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> IncidentDiagnosisWorkflowResult:
     """Generate and persist one diagnosis per incident."""
     resolved_settings = settings or get_settings()
+    deadline = clock() + resolved_settings.diagnosis_timeout_seconds
 
     existing_diagnosis = _find_existing_diagnosis(
         db,
@@ -208,6 +228,7 @@ def get_or_create_incident_diagnosis(
         db,
         "Unable to finish incident evidence retrieval",
     )
+    _ensure_diagnosis_deadline(db, deadline, clock)
 
     try:
         if prepared_memory is None:
@@ -233,6 +254,8 @@ def get_or_create_incident_diagnosis(
             "Unable to generate incident diagnosis",
             category="diagnosis",
         ) from exc
+
+    _ensure_diagnosis_deadline(db, deadline, clock)
 
     try:
         similar_memories = find_similar_incident_memories(
@@ -260,6 +283,7 @@ def get_or_create_incident_diagnosis(
         db,
         "Unable to finish similar incident retrieval",
     )
+    _ensure_diagnosis_deadline(db, deadline, clock)
 
     try:
         generated_diagnosis = generate_incident_diagnosis(
@@ -281,6 +305,8 @@ def get_or_create_incident_diagnosis(
             "Unable to generate incident diagnosis",
             category="diagnosis",
         ) from exc
+
+    _ensure_diagnosis_deadline(db, deadline, clock)
 
     diagnosis = IncidentDiagnosis(
         incident_id=incident_id_value,
@@ -313,6 +339,8 @@ def get_or_create_incident_diagnosis(
             diagnosis=concurrent_diagnosis,
             created=False,
         )
+
+    _ensure_diagnosis_deadline(db, deadline, clock)
 
     try:
         if prepared_memory.needs_persistence:

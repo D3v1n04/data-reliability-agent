@@ -29,6 +29,12 @@ Parameters:
     MinValue: 0
     MaxValue: 10
     Description: Use 0 to omit the limit when the account cannot reserve concurrency
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 25
+    AllowedValues:
+      - 25
+    Description: Fixed backend Lambda timeout in seconds
 
 Conditions:
   HasAlarmNotificationEmail: !Not
@@ -45,7 +51,7 @@ Globals:
     Architectures:
       - x86_64
     MemorySize: 1024
-    Timeout: 25
+    Timeout: !Ref LambdaTimeoutSeconds
     LoggingConfig:
       ApplicationLogLevel: INFO
       LogFormat: JSON
@@ -59,9 +65,11 @@ Globals:
         BEDROCK_TEXT_MODEL_ID: !Ref BedrockTextModelId
         BEDROCK_EMBEDDING_MODEL_ID: !Ref BedrockEmbeddingModelId
         BEDROCK_EMBEDDING_DIMENSIONS: "256"
-        BEDROCK_CONNECT_TIMEOUT_SECONDS: "3"
-        BEDROCK_READ_TIMEOUT_SECONDS: "20"
-        AWS_MAX_ATTEMPTS: "2"
+        BEDROCK_CONNECT_TIMEOUT_SECONDS: "2"
+        BEDROCK_READ_TIMEOUT_SECONDS: "5"
+        AWS_TOTAL_MAX_ATTEMPTS: "1"
+        DIAGNOSIS_TIMEOUT_SECONDS: "20"
+        LAMBDA_TIMEOUT_SECONDS: !Ref LambdaTimeoutSeconds
         DATABASE_POOL_SIZE: "1"
         DATABASE_MAX_OVERFLOW: "0"
         DATABASE_POOL_TIMEOUT_SECONDS: "5"

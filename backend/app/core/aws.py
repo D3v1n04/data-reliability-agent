@@ -33,7 +33,7 @@ def create_aws_client_config(settings: Settings) -> Config:
         connect_timeout=settings.bedrock_connect_timeout_seconds,
         read_timeout=settings.bedrock_read_timeout_seconds,
         retries={
-            "max_attempts": settings.aws_max_attempts,
+            "total_max_attempts": settings.aws_total_max_attempts,
             "mode": "standard",
         },
     )

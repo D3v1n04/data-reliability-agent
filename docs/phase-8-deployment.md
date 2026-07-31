@@ -19,6 +19,17 @@ The SAM stack creates:
   database failure alarms.
 - An optional SNS email subscription when `ALARM_NOTIFICATION_EMAIL` is set.
 
+Diagnosis has a 20-second monotonic application deadline within Lambda's
+25-second timeout. Titan and Nova each use one total attempt with a 2-second
+connect timeout and 5-second read timeout, for a 14-second aggregate configured
+socket-timeout budget. The remaining 6 seconds inside the diagnosis budget are
+reserved for database and application work, with 5 more seconds reserved before
+Lambda termination. Using one total attempt means there is no SDK retry backoff
+in this path. These values are configured limits, not measured production
+latency. Deadline checks occur between synchronous phases and cannot cancel an
+SDK operation already in progress; connect/read timeouts bound individual
+socket waits rather than total wall-clock duration.
+
 Lambda stays outside a VPC to avoid the fixed cost of a NAT Gateway. It connects
 to CockroachDB's public endpoint using verified TLS, the restricted `dra_app`
 user, a pool of one connection per Lambda environment, and bounded connection
