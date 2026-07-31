@@ -1,6 +1,6 @@
 # Judge-perspective repository audit
 
-Audit date: July 31, 2026  
+Audit date: July 31, 2026
 Baseline: `main` at `72a2c8e`
 
 ## Executive assessment
