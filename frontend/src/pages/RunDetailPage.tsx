@@ -44,7 +44,7 @@ export function RunDetailPage() {
       const runData = await getPipelineRun(runId);
       const [pipelineData, incidents] = await Promise.all([
         getPipeline(runData.pipeline_id),
-        getIncidents(),
+        getIncidents({ pipeline_run_id: runData.id }),
       ]);
       setRun(runData);
       setPipeline(pipelineData);
