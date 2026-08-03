@@ -211,63 +211,6 @@ export function IncidentDetailPage() {
         }
       />
 
-      <section className="lifecycle-bar">
-        <div className="lifecycle-steps" aria-label="Incident lifecycle">
-          {(["open", "investigating", "resolved"] as const).map(
-            (status, index) => {
-              const statusIndex = [
-                "open",
-                "investigating",
-                "resolved",
-              ].indexOf(incident.status);
-              const complete = index <= statusIndex;
-
-              return (
-                <div
-                  className={`lifecycle-step ${
-                    complete ? "lifecycle-step--complete" : ""
-                  }`}
-                  key={status}
-                >
-                  <span>{complete ? <CheckCircle2 size={17} /> : index + 1}</span>
-                  <strong>{titleCase(status)}</strong>
-                </div>
-              );
-            },
-          )}
-        </div>
-        <div className="lifecycle-action">
-          {nextStatus ? (
-            <button
-              className="button button--primary"
-              type="button"
-              disabled={updatingStatus}
-              onClick={() => void transitionStatus(nextStatus)}
-            >
-              {updatingStatus ? (
-                <LoaderCircle className="spin" size={17} />
-              ) : nextStatus === "investigating" ? (
-                <FileSearch size={17} />
-              ) : (
-                <ShieldCheck size={17} />
-              )}
-              {nextStatus === "investigating"
-                ? "Start investigation"
-                : "Resolve incident"}
-            </button>
-          ) : (
-            <span className="terminal-state">
-              <ShieldCheck size={17} /> Terminal audit record
-            </span>
-          )}
-          {statusError && (
-            <span className="field-error" role="alert">
-              {statusError}
-            </span>
-          )}
-        </div>
-      </section>
-
       <section className="incident-metadata" aria-label="Incident metadata">
         <div>
           <Clock3 size={17} />
@@ -361,7 +304,7 @@ export function IncidentDetailPage() {
       <section className="panel diagnosis-panel">
         <div className="panel__header">
           <div>
-            <span className="eyebrow">Amazon Bedrock + incident memory</span>
+            <span className="eyebrow">Bounded investigation guidance</span>
             <h2>
               <BrainCircuit size={21} /> AI-assisted diagnosis
             </h2>
@@ -552,6 +495,79 @@ export function IncidentDetailPage() {
           )}
         </section>
       )}
+
+      <section className="panel lifecycle-panel">
+        <div className="panel__header">
+          <div>
+            <span className="eyebrow">Operator action</span>
+            <h2>
+              <ShieldCheck size={20} /> Incident lifecycle
+            </h2>
+          </div>
+        </div>
+        <div className="lifecycle-bar">
+          <div className="lifecycle-steps" aria-label="Incident lifecycle">
+            {(["open", "investigating", "resolved"] as const).map(
+              (status, index) => {
+                const statusIndex = [
+                  "open",
+                  "investigating",
+                  "resolved",
+                ].indexOf(incident.status);
+                const complete = index <= statusIndex;
+
+                return (
+                  <div
+                    className={`lifecycle-step ${
+                      complete ? "lifecycle-step--complete" : ""
+                    }`}
+                    key={status}
+                  >
+                    <span>
+                      {complete ? (
+                        <CheckCircle2 size={17} />
+                      ) : (
+                        index + 1
+                      )}
+                    </span>
+                    <strong>{titleCase(status)}</strong>
+                  </div>
+                );
+              },
+            )}
+          </div>
+          <div className="lifecycle-action">
+            {nextStatus ? (
+              <button
+                className="button button--primary"
+                type="button"
+                disabled={updatingStatus}
+                onClick={() => void transitionStatus(nextStatus)}
+              >
+                {updatingStatus ? (
+                  <LoaderCircle className="spin" size={17} />
+                ) : nextStatus === "investigating" ? (
+                  <FileSearch size={17} />
+                ) : (
+                  <ShieldCheck size={17} />
+                )}
+                {nextStatus === "investigating"
+                  ? "Start investigation"
+                  : "Resolve incident"}
+              </button>
+            ) : (
+              <span className="terminal-state">
+                <ShieldCheck size={17} /> Terminal audit record
+              </span>
+            )}
+            {statusError && (
+              <span className="field-error" role="alert">
+                {statusError}
+              </span>
+            )}
+          </div>
+        </div>
+      </section>
     </main>
   );
 }

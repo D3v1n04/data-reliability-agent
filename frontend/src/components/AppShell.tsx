@@ -63,8 +63,8 @@ export function AppShell() {
             <DatabaseZap size={20} strokeWidth={2.2} />
           </div>
           <div>
-            <span className="brand__name">Reliability</span>
-            <span className="brand__product">Data Agent</span>
+            <span className="brand__name">Data Reliability</span>
+            <span className="brand__product">Agent</span>
           </div>
           <button
             className="icon-button sidebar__close"
@@ -137,7 +137,7 @@ export function AppShell() {
           </button>
           <div className="mobile-header__brand">
             <Activity size={18} />
-            <span>Reliability</span>
+            <span>Data Reliability Agent</span>
           </div>
           <span className="mobile-header__spacer" />
         </header>
